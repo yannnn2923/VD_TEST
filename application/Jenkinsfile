@@ -1,0 +1,30 @@
+@Library('build_libs') _
+
+// Propriétés du job
+properties([
+    buildDiscarder(logRotator(numToKeepStr: "10"))
+])
+withTools([
+    [name: 'buildkit', image: 'moby/buildkit', version:'rootless']
+]) {
+        stage('Récupération code source') {
+            println '🔰 Récupération du code source'
+            scmInfo = checkout scm
+            println '✔️ Récupération du code source effectuée'
+        }
+        stage('Build docker') {
+                println '📜 build Docker avec Buildkit'
+                env.IMAGE_NAME = 'vda3'
+                //env.IMAGE_NAME = 'registry-docker.apps.eul.sncf.fr/04374.dev/vda3'
+                env.IMAGE_VERSION = '1.0.0'
+                container('buildkit') {
+                    result = sh(script: "eul image build ./application/ --tag=$IMAGE_NAME:$IMAGE_VERSION", returnStatus: true)
+                    if (result != 0) {
+                        error '❌ Le build Docker avec BuildKit a échoué'
+                    }
+                }
+                println '✔️ build Docker effectué'
+        }
+        currentBuild.result = 'SUCCESS'
+}
+

@@ -1,0 +1,194 @@
+#!/usr/bin/env groovy
+// Version template jenkinsfile iac : 1.2.4
+@Library(['iac_libs', 'build_libs']) _
+
+import com.sncf.eul.common.BuildContext
+
+// Options du build. Plusieurs sont définies via la méthode defaultBuildOptions.
+// Consulter le README du template pour plus d'informations
+Map buildOptions = [
+    // Nombre de builds à conserver dans l'historique des builds du job Jenkins
+    NUM_TO_KEEP: 50,
+    // Nombre d'artifacts à conserver dans l'historique des builds du job Jenkins
+    ARTIFACT_NUM_TO_KEEP: 50,
+    // Version de Terraform
+    // A sélectionner parmis https://docs.apps.eul.sncf.fr/share/image-terraform
+    TERRAFORM_VERSION: '1.8',
+    // Url de l'inventaire d'IaC
+    INVENTORY_GIT_URL: 'https://gitlab-repo-gpf.apps.eul.sncf.fr/dosn/2608/pic/templates/terraform-inventory.git',
+]
+// Valorisation des options par défaut
+try {
+    buildOptions = defaultBuildOptions(buildOptions)
+} catch (AssertionError error) {
+    echo("⚠️ Les valeurs par défaut des options du build n'ont pas pu être récupérées : ${error}")
+}
+
+// Paramètres à customiser par le projet
+
+// Chaque nom d'environnement est associé à un credential (cpteSvcidCredsJenkins) jenkins (ex : cpte_svc_sdbx_01) contenant les infos de connexion du compte de service et le role que doit assumer ce compte.
+// Si vous souhaitez disposer d'un compte de service, veuillez contacter ld.experts.ul.devops@sncf.fr
+// Les infos de connexion du compte de service doivent être stockées dans un "identifiant Jenkins" dans le folder du projet
+// Le nom du compte aws et du role à assumer est fourni par AWS. Voir : https://gitlab-repo-gpf.apps.eul.sncf.fr/dosn/2608/pic/templates/terraform
+// Le nom de chaque environnement doit également correspondre à un répertoire dans inventories ou sont stockés les .tfvars (voir documentation https://gitlab-repo-gpf.apps.eul.sncf.fr/dosn/2608/pic/shared-libs/iac_libs/iac_libs)
+Map awsEnvironments = [
+    "development": [
+        "region": "eu-west-3",
+        "accountId": "058264253061",
+        "accountName": "esncf-tod-tod-sf-nonprod-01",
+        "role": "tod-nonprod-iac-01",
+        "profile": "saml",
+    ],
+    "preproduction": [
+        "region": "eu-west-3",
+        "accountId": "058264253061",
+        "accountName": "esncf-tod-tod-sf-nonprod-01",
+        "role": "tod-nonprod-iac-01",
+        "profile": "saml",
+    ]
+
+]
+
+// Paramètres du job Jenkins
+properties([
+    parameters([
+        choice(name: "Environnement", description: "Environnement applicatif.",   choices: awsEnvironments.keySet().join('\n')),
+        booleanParam(name: "Plan",    description: "Planifier les modifications", defaultValue: true),
+        booleanParam(name: "Apply",   description: "Appliquer les modifications", defaultValue: false),
+        booleanParam(name: "Destroy", description: "Détruire l'infra",            defaultValue: false),
+	string(name: 'BranchName', description: "Nom de la branche à utiliser", defaultValue: 'main', trim: true)
+    ]),
+    buildDiscarder(logRotator(numToKeepStr: "${buildOptions['NUM_TO_KEEP']}", artifactNumToKeepStr: "${buildOptions['ARTIFACT_NUM_TO_KEEP']}")), // Garder uniquement les 50 derniers build sur Jenkins
+    disableConcurrentBuilds(), // Désactiver les builds en parallèle pour éviter les écritures concurentes sur le state Terraform
+    gitLabConnection("${buildOptions['GITLAB_NAME']}"), // Connexion GitLab
+])
+
+BRANCH_NAME = "${env.BRANCH_NAME ? env.BRANCH_NAME : params.BranchName}"
+
+String environnement_p = params.Environnement
+Map awsEnvironnement_p = awsEnvironments[environnement_p]
+
+String action_type = ""
+if (params.Plan) {
+    action_type = "Plan"
+}
+if (params.Apply) {
+    action_type = "Apply"
+}
+if (params.Destroy) {
+    action_type = "Destroy"
+}
+currentBuild.displayName = "${action_type} IaC on '${environnement_p}'"
+
+/////////////////////////////////
+// Vérification des paramètres //
+/////////////////////////////////
+
+BuildContext context = BuildContext.current()
+String project_aresis = context?.project?.aresis
+Boolean is_running_on_pdc = context?.pic?.startsWith('pdc')
+
+assert project_aresis != null : "⛔ Impossible de déterminer le code ARESIS du projet"
+assert is_running_on_pdc != null : "⛔ Impossible de déterminer si le job est exécuté sur une PIC ou une PDC"
+
+//////////////
+// Pipeline //
+//////////////
+
+ArrayList environmentVars = [
+    "AWS_REGION=${awsEnvironnement_p.region}",
+    "AWS_PROFILE=${awsEnvironnement_p.profile}",
+    "TF_VAR_aws_region=${awsEnvironnement_p.region}",
+    "TF_VAR_aws_assume_role=arn:aws:iam::${awsEnvironnement_p.accountId}:role/${awsEnvironnement_p.role}",
+    "TF_VAR_aws_account_name=${awsEnvironnement_p.accountName}",
+    "TF_VAR_aws_account_id=${awsEnvironnement_p.accountId}",
+    "TF_VAR_aws_role=${awsEnvironnement_p.role}",
+]
+
+// Initialisation de l'environnement Terraform
+iacWrapper([terraformVersion: buildOptions['TERRAFORM_VERSION'], terraformRegistry: 'sncf', terraformImage: '04325.prod/terraform-full', environment: environnement_p]) {
+
+    // Récupération des sources du projet
+    stage('Récuperation des sources Terraform') {
+        checkout scm: [$class: "GitSCM", userRemoteConfigs: [[url: GIT_URL,
+                        credentialsId: buildOptions['CREDENTIALS_ID_GITLAB'] ]], branches: [[name: BRANCH_NAME]]]
+    }
+
+    // Récupérer un inventaire externe
+    // dir("inventories/${environnement_p}") {
+    //     checkout scm: [$class: "GitSCM", userRemoteConfigs: [[url: buildOptions['INVENTORY_GIT_URL'],
+    //                     credentialsId: buildOptions['CREDENTIALS_ID_GITLAB'] ]], branches: [[name: environnement_p]]]
+    // }
+
+    stage('Authentification à AWS') {
+        container('terraform') {
+            awsLoadCredentials(awsEnvironnement_p.accountId, awsEnvironnement_p.role, '3600', '', ["arn:aws:iam::${awsEnvironnement_p.accountId}:role/${awsEnvironnement_p.role}"])
+        }
+    }
+
+    withEnv(environmentVars) {
+    dir('terraform/') { // Chemin vers le répertoire contenant le code IaC. le bloc dir peut être retiré (tout en gardant ce qu'il y a à l'intérieur) si le code terraform se trouve à la racine du projet.
+        // Initialisation de l'environnement d'exécution de l'IaC
+        // Téléchargement des providers & des modules
+        iacInit {
+            options = [:]
+        }
+
+        // Validation du code source de l'IaC
+        iacValidate {}
+
+        if (params.Plan) {
+            // Planification des modifications sur l'infrastructure
+            iacPlan {
+                options = [:]
+            }
+
+            // Vérification de la compliance des ressources crées
+            iacCompliance {}
+        }
+
+        if (params.Apply) {
+            // Vérifications avant application des modifications sur l'infrastructure
+            input(
+                message: "⚠️ Confirmez-vous l'application des modifications sur l'environnement ${environnement_p} ?",
+                ok: "Oui je souhaite appliquer les modifications sur l\'environnement ${environnement_p}",
+                submitter: "EUL_${project_aresis}_OPS"
+            )
+
+            // Application des modifications sur l'infrastructure
+            iacApply {
+                options = [:]
+            }
+        }
+
+        if (params.Destroy) {
+            // Le block suivant peut être modifié, selon les besoins et le contexte du projet
+            // Vérifications avant destruction de l'infrastructure
+            if (is_running_on_pdc) {
+                error("⛔ La destruction de l'infrastructure n'est pas autorisée sur une PDC")
+            }
+
+            // Planification de la destruction de l'infrastructure
+            // Cette étape permet de lister les ressources qui seront détruites
+            // C'est une étape sans incidence sur l'infrastructure mais qui permet de vérifier ce qu'on fait
+            iacPlan {
+                options = [
+                    destroy: true
+                ]
+            }
+
+            input(
+                message: "⚠️ Confirmez-vous la suppression des toutes les ressources de l'environnement ${environnement_p} ?",
+                ok: "Oui je souhaite détruire l\'environnement ${environnement_p}",
+                submitter: "EUL_${project_aresis}_OPS"
+            )
+
+            // Destruction de l'infrastructure
+            iacDestroy {
+                options = [:]
+            }
+        }
+    }
+    }
+}
+

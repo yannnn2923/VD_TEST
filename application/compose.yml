@@ -1,0 +1,28 @@
+services:
+  db:
+    container_name: db
+    image: postgres
+    environment:
+      POSTGRES_PASSWORD: "toto"
+      POSTGRES_USER: "dbuser"
+      POSTGRES_DB: "vda"
+    ports:
+      - "5432:5432"
+  gunicorn:
+    container_name: gunicorn
+    build:
+      context: ../
+      dockerfile: ./application/Dockerfile
+    environment:
+      URL_PREFIX: "vda"
+      POSTGRES_PASSWORD: "toto"
+      POSTGRES_HOST: "db"
+      POSTGRES_DB: "vda"
+      POSTGRES_USER: "dbuser"
+      POSTGRES_PORT: "5432"
+    links:
+      - db
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db

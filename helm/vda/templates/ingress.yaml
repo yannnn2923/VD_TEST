@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: "{{ .Release.Name }}-vda-ingress"
+  labels:
+    {{- include "mon-chart.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/tags: "app={{ .Release.Name }}, component=vda"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    kubertes.io/ingress.class: "alb"
+    alb.ingress.kubernetes.io/security-groups: "sg-08e5f0f2eedb8cf1b"
+spec:
+  ingressClassName: "alb"
+  rules:
+    - host: "{{ .Release.Name }}.tod-dev01.dok-todnp-tod01.sncf-nonprod.sncf.eks"
+      http:
+        paths:
+          - path: "/*"
+            pathType: "ImplementationSpecific"
+            backend:
+              service:
+                name: "{{ .Release.Name }}-vda-service"
+                port:
+                  number: 80
